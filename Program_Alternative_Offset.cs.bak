@@ -1,0 +1,114 @@
+using UbuntuPlcApiSender.Services;
+using System.Collections.Concurrent;
+
+Console.WriteLine("=== Ubuntu PLC API Sender - Alternativní řešení s offsetem ===");
+Console.WriteLine("Tato verze střídá čtení PLC a odesílání API po 0,5 sekundy");
+Console.WriteLine("0,0s: Čte PLC | 0,5s: Odesílá API | 1,0s: Čte PLC | 1,5s: Odesílá API...");
+Console.WriteLine();
+
+// Konfigurace
+var plcIpAddress = "192.168.0.10";
+var plcRack = (short)0;
+var plcSlot = (short)1;
+var apiBaseUrl = "https://drevostroj.app";
+var apiKey = "drevostrojapi2024";
+var baseInterval = 500; // 0,5 sekundy
+
+Console.WriteLine("=== KONFIGURACE ===");
+Console.WriteLine($"PLC IP: {plcIpAddress}");
+Console.WriteLine($"API URL: {apiBaseUrl}/api/MachinesApi/DRST_0001");
+Console.WriteLine($"Základní interval: {baseInterval}ms");
+Console.WriteLine("Režim: Střídavé úkoly s offsetem");
+Console.WriteLine();
+
+var plcReader = new PlcReader(plcIpAddress, plcRack, plcSlot);
+var apiClient = new ApiClient(apiBaseUrl, apiKey);
+UbuntuPlcApiSender.Models.Machine? latestMachine = null;
+
+Console.WriteLine("Pro ukončení stiskněte Ctrl+C");
+Console.WriteLine();
+Console.WriteLine("--- Začíná střídavé čtení PLC a odesílání API ---");
+
+var cts = new CancellationTokenSource();
+Console.CancelKeyPress += (_, e) =>
+{
+    e.Cancel = true;
+    cts.Cancel();
+    Console.WriteLine("\n--- Ukončování aplikace... ---");
+};
+
+var mainTask = Task.Run(async () =>
+{
+    var iteration = 0;
+    var isPlcTurn = true; // true = čtení PLC, false = odesílání API
+    
+    while (!cts.Token.IsCancellationRequested)
+    {
+        iteration++;
+        
+        if (isPlcTurn)
+        {
+            // Čtení z PLC (každou lichou iteraci: 0,0s, 1,0s, 2,0s...)
+            if (plcReader.TryReadDRST0001(out var machine, out var errorMessage))
+            {
+                if (machine != null)
+                {
+                    latestMachine = machine;
+                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] 📊 PLC #{iteration/2 + 1} - Data načtena:");
+                    Console.WriteLine($"  • Spotřeba: {machine.PowerConsumption} W | DI1: {machine.DI1} | DI2: {machine.DI2} | Běží: {machine.IsRunning}");
+                }
+                else
+                {
+                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] ⚠️  PLC #{iteration/2 + 1} - Nepodařilo se načíst data");
+                }
+            }
+            else
+            {
+                var message = string.IsNullOrWhiteSpace(errorMessage)
+                    ? "PLC data se nepodařilo načíst."
+                    : errorMessage;
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] ❌ PLC #{iteration/2 + 1} - {message}");
+            }
+        }
+        else
+        {
+            // Odesílání na API (každou sudou iteraci: 0,5s, 1,5s, 2,5s...)
+            if (latestMachine != null)
+            {
+                var success = await apiClient.SendMachineDataAsync("DRST_0001", latestMachine);
+                
+                if (success)
+                {
+                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] ✓ API #{iteration/2} - Data úspěšně odeslána");
+                }
+                else
+                {
+                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] ✗ API #{iteration/2} - Chyba při odesílání");
+                }
+            }
+            else
+            {
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] ⚠️  API #{iteration/2} - Žádná data k odeslání");
+            }
+        }
+        
+        // Střídání mezi čtením PLC a odesíláním API
+        isPlcTurn = !isPlcTurn;
+        
+        try
+        {
+            await Task.Delay(baseInterval, cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            break;
+        }
+    }
+}, cts.Token);
+
+await mainTask;
+
+// Cleanup
+apiClient.Dispose();
+plcReader.Close();
+Console.WriteLine("--- Aplikace ukončena ---");

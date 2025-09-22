@@ -1,0 +1,267 @@
+using UbuntuPlcApiSender.Services;
+using System.Collections.Concurrent;
+
+Console.WriteLine("=== Ubuntu PLC API Sender - Robustní verze ===");
+Console.WriteLine("Automatické obnovování spojení + Fallback režim + Persistentní data");
+Console.WriteLine();
+
+// Konfigurace
+var plcIpAddress = "192.168.0.10";
+var plcRack = (short)0;
+var plcSlot = (short)1;
+var apiBaseUrl = "https://drevostroj.app";
+var apiKey = "drevostrojapi2024";
+var plcReadInterval = 1000; // 1 sekunda pro čtení PLC
+var apiSendInterval = 1000; // 1 sekunda pro odesílání API
+var healthReportInterval = 30000; // 30 sekund pro health report
+
+// Konfigurace strojů
+var machinesWithApi = new[] { "DRS_0001" };
+var allMachineNames = new[] { "DRS_0001", "DRS_0002", "DRS_0003", "DRS_0004" };
+
+// Služby
+var plcReader = new PlcReader(plcIpAddress, plcRack, plcSlot);
+var apiClient = new ApiClient(apiBaseUrl, apiKey);
+var connectionManager = new ConnectionManager();
+
+// Thread-safe storage
+var currentMachineData = new ConcurrentDictionary<string, UbuntuPlcApiSender.Models.Machine>();
+
+Console.WriteLine("=== KONFIGURACE ===");
+Console.WriteLine($"PLC IP: {plcIpAddress}");
+Console.WriteLine($"API URL: {apiBaseUrl}/api/MachinesApi/{{machineId}}");
+Console.WriteLine($"Interval čtení PLC: {plcReadInterval}ms");
+Console.WriteLine($"Interval odesílání API: {apiSendInterval}ms");
+Console.WriteLine($"Fallback práh: 10 sekund");
+Console.WriteLine($"Stroje na API: {string.Join(", ", machinesWithApi)}");
+Console.WriteLine($"Všechny stroje: {string.Join(", ", allMachineNames)}");
+Console.WriteLine("Režim: Robustní s automatickým obnovováním spojení");
+Console.WriteLine();
+
+// Graceful shutdown
+var cts = new CancellationTokenSource();
+Console.CancelKeyPress += (_, e) =>
+{
+    e.Cancel = true;
+    cts.Cancel();
+    Console.WriteLine("\n--- Ukončování aplikace... ---");
+};
+
+// Zachycení neočekávaných chyb
+AppDomain.CurrentDomain.UnhandledException += (sender, e) =>
+{
+    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 💥 Kritická chyba: {e.ExceptionObject}");
+    connectionManager.SaveStatesOnExit();
+};
+
+Console.WriteLine("Pro ukončení stiskněte Ctrl+C");
+Console.WriteLine();
+Console.WriteLine("--- Spouštím robustní monitoring systém ---");
+
+// Task 1: Robustní čtení z PLC s automatickým obnovováním
+var plcReadTask = Task.Run(async () =>
+{
+    var iteration = 0;
+    var lastHealthReport = DateTime.MinValue;
+    
+    while (!cts.Token.IsCancellationRequested)
+    {
+        iteration++;
+        var readSuccess = false;
+        
+        try
+        {
+            // Pokus o čtení dat z PLC
+            if (plcReader.TryReadMachinesByAliases(allMachineNames, out var machines, out var errorMessage))
+            {
+                readSuccess = true;
+                connectionManager.UpdateConnectionStatus(true);
+                
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 📊 PLC #{iteration} - Načteno {machines.Count} strojů (ŽIVÁ DATA):");
+                
+                foreach (var machine in machines)
+                {
+                    // Aktualizovat connection manager a lokální cache
+                    connectionManager.UpdateMachineState(machine);
+                    currentMachineData.AddOrUpdate(machine.Abbreviation, machine, (key, oldValue) => machine);
+                    
+                    var apiStatus = machinesWithApi.Contains(machine.Abbreviation) ? "→API" : "lokálně";
+                    Console.WriteLine($"  • {machine.Abbreviation}: {machine.PowerConsumption}W | DI1:{machine.DI1} | DI2:{machine.DI2} | Běží:{machine.IsRunning} ({apiStatus})");
+                }
+            }
+            else
+            {
+                // PLC čtení selhalo - použij fallback data
+                connectionManager.UpdateConnectionStatus(false);
+                
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 🔄 PLC #{iteration} - Spojení selhalo, používám FALLBACK data:");
+                Console.WriteLine($"  Chyba: {errorMessage}");
+                
+                // Generuj fallback data pro všechny stroje
+                foreach (var machineName in allMachineNames)
+                {
+                    var fallbackMachine = connectionManager.GetFallbackData(machineName);
+                    if (fallbackMachine != null)
+                    {
+                        currentMachineData.AddOrUpdate(machineName, fallbackMachine, (key, oldValue) => fallbackMachine);
+                        
+                        var apiStatus = machinesWithApi.Contains(machineName) ? "→API" : "lokálně";
+                        var dataType = fallbackMachine.PowerConsumption == -999 ? "FALLBACK" : "CACHED";
+                        Console.WriteLine($"  • {machineName}: {fallbackMachine.PowerConsumption}W | DI1:{fallbackMachine.DI1} | DI2:{fallbackMachine.DI2} | Běží:{fallbackMachine.IsRunning} ({apiStatus}) [{dataType}]");
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            connectionManager.UpdateConnectionStatus(false);
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ❌ PLC #{iteration} - Neočekávaná chyba: {ex.Message}");
+        }
+
+        // Periodický health report
+        if (DateTime.UtcNow - lastHealthReport > TimeSpan.FromMilliseconds(healthReportInterval))
+        {
+            var health = connectionManager.GetConnectionHealth();
+            Console.WriteLine($"\n[{DateTime.Now:HH:mm:ss}] 🏥 HEALTH: Spojení={health["IsConnected"]}, Selhání={health["ConsecutiveFailures"]}, Bez spojení={health["TimeSinceLastConnection"]}");
+            lastHealthReport = DateTime.UtcNow;
+        }
+
+        try
+        {
+            await Task.Delay(plcReadInterval, cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            break;
+        }
+    }
+}, cts.Token);
+
+// Task 2: Kontinuální odesílání na API (i při výpadku PLC)
+var apiSendTask = Task.Run(async () =>
+{
+    var iteration = 0;
+    await Task.Delay(500); // Krátké zpoždění pro první data
+    
+    while (!cts.Token.IsCancellationRequested)
+    {
+        iteration++;
+        var successCount = 0;
+        var totalToSend = 0;
+        
+        foreach (var machineId in machinesWithApi)
+        {
+            totalToSend++;
+            
+            if (currentMachineData.TryGetValue(machineId, out var machine))
+            {
+                try
+                {
+                    var success = await apiClient.SendMachineDataAsync(machineId, machine);
+                    
+                    if (success)
+                    {
+                        successCount++;
+                        var dataSource = machine.PowerConsumption == -999 ? "FALLBACK" : "ŽIVÁ";
+                        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ✓ API #{iteration} - {machineId} odeslán ({dataSource} data)");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ✗ API #{iteration} - Chyba při odesílání {machineId}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ❌ API #{iteration} - Výjimka při odesílání {machineId}: {ex.Message}");
+                }
+            }
+            else
+            {
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ⚠️  API #{iteration} - Žádná data pro {machineId}");
+            }
+        }
+        
+        if (totalToSend > 0 && successCount < totalToSend)
+        {
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 📊 API #{iteration} - Odesláno {successCount}/{totalToSend} strojů");
+        }
+
+        try
+        {
+            await Task.Delay(apiSendInterval, cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            break;
+        }
+    }
+}, cts.Token);
+
+// Task 3: Monitoring a reporting
+var monitorTask = Task.Run(async () =>
+{
+    await Task.Delay(10000); // Počkat na stabilizaci
+    
+    while (!cts.Token.IsCancellationRequested)
+    {
+        try
+        {
+            Console.WriteLine($"\n[{DateTime.Now:HH:mm:ss}] 📈 === PŘEHLED VŠECH STROJŮ ===");
+            
+            foreach (var machineName in allMachineNames)
+            {
+                if (currentMachineData.TryGetValue(machineName, out var machine))
+                {
+                    var age = DateTime.UtcNow - machine.Timestamp;
+                    var apiStatus = machinesWithApi.Contains(machineName) ? "✓ API" : "○ Lokálně";
+                    var dataType = machine.PowerConsumption == -999 ? "[FALLBACK]" : "[ŽIVÁ]";
+                    var connectionStatus = connectionManager.ShouldUseFallbackData(machineName) ? "❌" : "✅";
+                    
+                    Console.WriteLine($"  {connectionStatus} {machineName}: {machine.PowerConsumption}W | DI1:{machine.DI1} | DI2:{machine.DI2} | Běží:{machine.IsRunning} | {apiStatus} | Stáří:{age.TotalSeconds:F1}s {dataType}");
+                }
+                else
+                {
+                    Console.WriteLine($"  ❓ {machineName}: Žádná data");
+                }
+            }
+            
+            var health = connectionManager.GetConnectionHealth();
+            Console.WriteLine($"  🔗 PLC: {(connectionManager.IsPlcConnected ? "PŘIPOJENO" : "ODPOJENO")} | Selhání: {health["ConsecutiveFailures"]} | Bez spojení: {health["TimeSinceLastConnection"]}");
+            Console.WriteLine();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ⚠️  Chyba v monitoring úkolu: {ex.Message}");
+        }
+        
+        try
+        {
+            await Task.Delay(30000, cts.Token); // Každých 30 sekund
+        }
+        catch (OperationCanceledException)
+        {
+            break;
+        }
+    }
+}, cts.Token);
+
+// Spustit všechny úkoly
+try
+{
+    await Task.WhenAll(plcReadTask, apiSendTask, monitorTask);
+}
+catch (OperationCanceledException)
+{
+    Console.WriteLine("--- Úkoly byly zrušeny ---");
+}
+catch (Exception ex)
+{
+    Console.WriteLine($"--- Neočekávaná chyba v hlavních úkolech: {ex.Message} ---");
+}
+
+// Cleanup
+Console.WriteLine("--- Ukládám finální stavy... ---");
+connectionManager.SaveStatesOnExit();
+apiClient.Dispose();
+plcReader.Close();
+Console.WriteLine("--- Aplikace ukončena ---");

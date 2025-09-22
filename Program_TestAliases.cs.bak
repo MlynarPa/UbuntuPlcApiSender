@@ -1,0 +1,65 @@
+using UbuntuPlcApiSender.Services;
+
+Console.WriteLine("=== Test aliasů strojů ===");
+Console.WriteLine();
+
+var plcReader = new PlcReader("192.168.0.10", 0, 1);
+
+Console.WriteLine("Podporované aliasy:");
+var supportedNames = plcReader.GetSupportedMachineNames();
+foreach (var name in supportedNames)
+{
+    Console.WriteLine($"  • {name}");
+}
+
+Console.WriteLine();
+Console.WriteLine("=== Testování různých aliasů ===");
+
+// Test různých aliasů
+var testAliases = new[] { "DRS_0001", "DRS1", "DRST_0001", "DRST1", "DRS_0002", "DRS2", "neznamy_stroj" };
+
+foreach (var alias in testAliases)
+{
+    Console.WriteLine($"\nTestuji alias: '{alias}'");
+    
+    if (plcReader.TryReadMachine(alias, out var machine, out var errorMessage))
+    {
+        if (machine != null)
+        {
+            Console.WriteLine($"  ✓ Úspěch! Načtena data pro: {machine.Abbreviation}");
+            Console.WriteLine($"    Spotřeba: {machine.PowerConsumption}W");
+            Console.WriteLine($"    DI1: {machine.DI1}, DI2: {machine.DI2}");
+            Console.WriteLine($"    Běží: {machine.IsRunning}");
+        }
+        else
+        {
+            Console.WriteLine($"  ⚠️  Úspěch, ale žádná data");
+        }
+    }
+    else
+    {
+        Console.WriteLine($"  ❌ Chyba: {errorMessage}");
+    }
+}
+
+Console.WriteLine();
+Console.WriteLine("=== Test čtení více strojů pomocí aliasů ===");
+
+var mixedAliases = new[] { "DRS_0001", "DRST_0002", "DRS3", "DRST4" };
+Console.WriteLine($"Testuji aliasy: {string.Join(", ", mixedAliases)}");
+
+if (plcReader.TryReadMachinesByAliases(mixedAliases, out var machines, out var error))
+{
+    Console.WriteLine($"✓ Načteno {machines.Count} strojů:");
+    foreach (var machine in machines)
+    {
+        Console.WriteLine($"  • {machine.Abbreviation}: {machine.PowerConsumption}W | DI1:{machine.DI1} | DI2:{machine.DI2} | Běží:{machine.IsRunning}");
+    }
+}
+else
+{
+    Console.WriteLine($"❌ Chyba při čtení více strojů: {error}");
+}
+
+plcReader.Close();
+Console.WriteLine("\n--- Test dokončen ---");
