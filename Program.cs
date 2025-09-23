@@ -12,8 +12,9 @@ var plcRack = (short)0;
 var plcSlot = (short)1;
 var apiBaseUrl = "https://drevostroj.app";
 var apiKey = "drevostrojapi2024";
-var plcReadInterval = 1000; // 1 sekunda pro čtení PLC
-var apiSendInterval = 1000; // 1 sekunda pro odesílání API
+var plcReadInterval = 5000; // 5 sekund pro čtení PLC
+var apiSendInterval = 5000; // 5 sekund pro odesílání API
+var apiSendOffset = 1000;   // API odesílá o 1 sekundu později než PLC
 
 // Thread-safe queue pro data mezi PLC čtením a API odesíláním
 var dataQueue = new ConcurrentQueue<UbuntuPlcApiSender.Models.Machine>();
@@ -25,7 +26,7 @@ Console.WriteLine($"PLC Rack: {plcRack}, Slot: {plcSlot}");
 Console.WriteLine($"API URL: {apiBaseUrl}/api/MachinesApi/DRST_0001");
 Console.WriteLine($"API Key: {apiKey} (přes X-API-Key header)");
 Console.WriteLine($"Interval čtení PLC: {plcReadInterval}ms");
-Console.WriteLine($"Interval odesílání API: {apiSendInterval}ms");
+Console.WriteLine($"Interval odesílání API: {apiSendInterval}ms (se zpožděním {apiSendOffset}ms)");
 Console.WriteLine("Režim: Paralelní úkoly (PLC čtení a API odesílání nezávisle)");
 Console.WriteLine();
 
@@ -92,8 +93,15 @@ var plcReadTask = Task.Run(async () =>
 var apiSendTask = Task.Run(async () =>
 {
     var iteration = 0;
-    await Task.Delay(100); // Malé zpoždění aby PLC stihlo načíst první data
-    
+    try
+    {
+        await Task.Delay(apiSendOffset, cts.Token); // Zpoždění, aby API odesílalo o 1s později než PLC čte
+    }
+    catch (OperationCanceledException)
+    {
+        return;
+    }
+
     while (!cts.Token.IsCancellationRequested)
     {
         iteration++;
