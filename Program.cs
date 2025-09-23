@@ -2,11 +2,7 @@
 using System.Collections.Concurrent;
 
 Console.WriteLine("=== Ubuntu PLC API Sender ===");
-
-string[] machinesWithApi = { "DRST_0001" };
-var machineId = machinesWithApi[0];
-
-Console.WriteLine($"Tato aplikace čte reálná data z PLC pro stroj {machineId}");
+Console.WriteLine("Tato aplikace čte reálná data z PLC pro stroj DRST_0001");
 Console.WriteLine("a odesílá je na drevostroj.app API pomocí PUT požadavku.");
 Console.WriteLine();
 
@@ -26,11 +22,10 @@ var latestData = new ConcurrentDictionary<string, UbuntuPlcApiSender.Models.Mach
 Console.WriteLine("=== KONFIGURACE ===");
 Console.WriteLine($"PLC IP: {plcIpAddress}");
 Console.WriteLine($"PLC Rack: {plcRack}, Slot: {plcSlot}");
-Console.WriteLine($"API URL: {apiBaseUrl}/api/MachinesApi/{machineId}");
+Console.WriteLine($"API URL: {apiBaseUrl}/api/MachinesApi/DRST_0001");
 Console.WriteLine($"API Key: {apiKey} (přes X-API-Key header)");
 Console.WriteLine($"Interval čtení PLC: {plcReadInterval}ms");
 Console.WriteLine($"Interval odesílání API: {apiSendInterval}ms");
-Console.WriteLine($"Stroje odesílané na API: {string.Join(", ", machinesWithApi)}");
 Console.WriteLine("Režim: Paralelní úkoly (PLC čtení a API odesílání nezávisle)");
 Console.WriteLine();
 
@@ -63,7 +58,7 @@ var plcReadTask = Task.Run(async () =>
             if (machine != null)
             {
                 // Uložit nejnovější data
-                latestData.AddOrUpdate(machineId, machine, (key, oldValue) => machine);
+                latestData.AddOrUpdate("DRST_0001", machine, (key, oldValue) => machine);
                 
                 Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 📊 PLC #{iteration} - Data načtena:");
                 Console.WriteLine($"  • Spotřeba: {machine.PowerConsumption} W | DI1: {machine.DI1} | DI2: {machine.DI2} | Běží: {machine.IsRunning}");
@@ -103,9 +98,9 @@ var apiSendTask = Task.Run(async () =>
     {
         iteration++;
         
-        if (latestData.TryGetValue(machineId, out var machine))
+        if (latestData.TryGetValue("DRST_0001", out var machine))
         {
-            var success = await apiClient.SendMachineDataAsync(machineId, machine);
+            var success = await apiClient.SendMachineDataAsync("DRST_0001", machine);
             
             if (success)
             {
