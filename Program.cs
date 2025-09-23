@@ -1,143 +1,265 @@
-﻿using UbuntuPlcApiSender.Services;
-using System.Collections.Concurrent;
+using System.Net.Sockets;
+using System.Threading;
+using S7.Net;
+using UbuntuPlcApiSender.Models;
+using UbuntuPlcApiSender.Services;
 
 Console.WriteLine("=== Ubuntu PLC API Sender ===");
 Console.WriteLine("Tato aplikace čte reálná data z PLC pro stroj DRST_0001");
 Console.WriteLine("a odesílá je na drevostroj.app API pomocí PUT požadavku.");
 Console.WriteLine();
 
-// Konfigurace
-var plcIpAddress = "192.168.0.10";  // IP adresa PLC - ZMĚŇ PODLE POTŘEBY
-var plcRack = (short)0;
-var plcSlot = (short)1;
-var apiBaseUrl = "https://drevostroj.app";
-var apiKey = "drevostrojapi2024";
-var plcReadInterval = 5000; // 5 sekund pro čtení PLC
-var apiSendInterval = 5000; // 5 sekund pro odesílání API
-var apiSendOffset = 1000;   // API odesílá o 1 sekundu později než PLC
+string plcIpAddress = "192.168.0.10";
+short plcRack = 0;
+short plcSlot = 1;
+string apiBaseUrl = "https://drevostroj.app";
+string apiKey = "drevostrojapi2024";
+int plcReadInterval = 5000;
+int apiSendInterval = 5000;
+int apiSendOffset = 1000;
 
-// Thread-safe queue pro data mezi PLC čtením a API odesíláním
-var dataQueue = new ConcurrentQueue<UbuntuPlcApiSender.Models.Machine>();
-var latestData = new ConcurrentDictionary<string, UbuntuPlcApiSender.Models.Machine>();
+string GetEnv(string key, string @default) => Environment.GetEnvironmentVariable(key) ?? @default;
+
+plcIpAddress = GetEnv("PLC_IP", plcIpAddress);
+plcRack = short.Parse(GetEnv("PLC_RACK", plcRack.ToString()));
+plcSlot = short.Parse(GetEnv("PLC_SLOT", plcSlot.ToString()));
+plcReadInterval = int.Parse(GetEnv("READ_INTERVAL_MS", plcReadInterval.ToString()));
+apiSendInterval = int.Parse(GetEnv("SEND_INTERVAL_MS", apiSendInterval.ToString()));
+apiSendOffset = int.Parse(GetEnv("SEND_OFFSET_MS", apiSendOffset.ToString()));
 
 Console.WriteLine("=== KONFIGURACE ===");
 Console.WriteLine($"PLC IP: {plcIpAddress}");
-Console.WriteLine($"PLC Rack: {plcRack}, Slot: {plcSlot}");
+Console.WriteLine($"PLC Rack/Slot: {plcRack}/{plcSlot}");
 Console.WriteLine($"API URL: {apiBaseUrl}/api/MachinesApi/DRST_0001");
 Console.WriteLine($"API Key: {apiKey} (přes X-API-Key header)");
-Console.WriteLine($"Interval čtení PLC: {plcReadInterval}ms");
-Console.WriteLine($"Interval odesílání API: {apiSendInterval}ms (se zpožděním {apiSendOffset}ms)");
-Console.WriteLine("Režim: Paralelní úkoly (PLC čtení a API odesílání nezávisle)");
+Console.WriteLine($"Interval čtení PLC: {plcReadInterval} ms");
+Console.WriteLine($"Interval odesílání API: {apiSendInterval} ms (offset {apiSendOffset} ms)");
+Console.WriteLine("Režim: Rychlý reconnect po chybě (max 5 s)");
 Console.WriteLine();
-
-var plcReader = new PlcReader(plcIpAddress, plcRack, plcSlot);
-var apiClient = new ApiClient(apiBaseUrl, apiKey);
-
 Console.WriteLine("Pro ukončení stiskněte Ctrl+C");
 Console.WriteLine();
-Console.WriteLine("--- Začínají paralelní úkoly: čtení PLC a odesílání API ---");
 
-// CancellationToken pro elegantní ukončení
-var cts = new CancellationTokenSource();
+using var cts = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) =>
 {
     e.Cancel = true;
-    cts.Cancel();
-    Console.WriteLine("\n--- Ukončování aplikace... ---");
+    if (!cts.IsCancellationRequested)
+    {
+        Console.WriteLine("\n--- Ukončování aplikace... ---");
+        cts.Cancel();
+    }
 };
 
-// Task 1: Čtení z PLC každou sekundu
-var plcReadTask = Task.Run(async () =>
-{
-    var iteration = 0;
-    while (!cts.Token.IsCancellationRequested)
-    {
-        iteration++;
-        
-        if (plcReader.TryReadDRST0001(out var machine, out var errorMessage))
-        {
-            if (machine != null)
-            {
-                // Uložit nejnovější data
-                latestData.AddOrUpdate("DRST_0001", machine, (key, oldValue) => machine);
-                
-                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 📊 PLC #{iteration} - Data načtena:");
-                Console.WriteLine($"  • Spotřeba: {machine.PowerConsumption} W | DI1: {machine.DI1} | DI2: {machine.DI2} | Běží: {machine.IsRunning}");
-            }
-            else
-            {
-                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ⚠️  PLC #{iteration} - Nepodařilo se načíst data");
-            }
-        }
-        else
-        {
-            var message = string.IsNullOrWhiteSpace(errorMessage)
-                ? "PLC data se nepodařilo načíst."
-                : errorMessage;
+using var apiClient = new ApiClient(apiBaseUrl, apiKey);
 
-            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ❌ PLC #{iteration} - {message}");
-        }
+Plc? plc = null;
+int backoffMs = 1000;
+const int backoffMax = 5000;
+DateTime nextSendTime = DateTime.UtcNow.AddMilliseconds(apiSendOffset);
+
+bool WaitWithCancellation(int milliseconds)
+{
+    if (cts.IsCancellationRequested)
+    {
+        return true;
+    }
+
+    if (milliseconds <= 0)
+    {
+        return cts.IsCancellationRequested;
+    }
+
+    return cts.Token.WaitHandle.WaitOne(milliseconds);
+}
+
+bool Connect()
+{
+    SafeClose();
+
+    try
+    {
+        plc = new Plc(CpuType.S71200, plcIpAddress, plcRack, plcSlot)
+        {
+            ReadTimeout = 1000,
+            WriteTimeout = 1000
+        };
+
+        plc.Open();
 
         try
         {
-            await Task.Delay(plcReadInterval, cts.Token);
+            if (plc?.TcpClient?.Client is Socket socket)
+            {
+                socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+            }
         }
-        catch (OperationCanceledException)
+        catch
         {
-            break;
+            // Best-effort keepalive, ignorujeme případnou chybu
         }
-    }
-}, cts.Token);
 
-// Task 2: Odesílání na API každou sekundu
-var apiSendTask = Task.Run(async () =>
+        nextSendTime = DateTime.UtcNow.AddMilliseconds(apiSendOffset);
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 🔌 PLC připojeno");
+        return true;
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ❌ Connect fail: {ex.Message}");
+        SafeClose();
+        return false;
+    }
+}
+
+void SafeClose()
 {
-    var iteration = 0;
     try
     {
-        await Task.Delay(apiSendOffset, cts.Token); // Zpoždění, aby API odesílalo o 1s později než PLC čte
+        plc?.Close();
+    }
+    catch
+    {
+        // ignored
+    }
+
+    try
+    {
+        plc?.Dispose();
+    }
+    catch
+    {
+        // ignored
+    }
+
+    plc = null;
+}
+
+bool TryReconnect()
+{
+    while (!cts.IsCancellationRequested)
+    {
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 🔁 Reconnect za {backoffMs} ms…");
+        if (WaitWithCancellation(backoffMs))
+        {
+            return false;
+        }
+
+        if (Connect())
+        {
+            return true;
+        }
+
+        backoffMs = Math.Min(backoffMs * 2, backoffMax);
+    }
+
+    return false;
+}
+
+Machine ReadMachineData(Plc plcInstance)
+{
+    bool ReadBool(int byteOffset, int bitOffset)
+    {
+        var value = plcInstance.Read(DataType.DataBlock, 1, byteOffset, VarType.Bit, 1, (byte)bitOffset);
+        if (value is bool b)
+        {
+            return b;
+        }
+
+        throw new InvalidOperationException("PLC returned unexpected boolean value");
+    }
+
+    short ReadInt(int offset)
+    {
+        var rawObj = plcInstance.ReadBytes(DataType.DataBlock, 1, offset, 2);
+        if (rawObj is byte[] raw && raw.Length >= 2)
+        {
+            return BitConverter.ToInt16(new[] { raw[1], raw[0] }, 0);
+        }
+
+        throw new InvalidOperationException("PLC returned unexpected byte array for integer value");
+    }
+
+    return new Machine
+    {
+        Abbreviation = "DRST_0001",
+        IsRunning = ReadBool(0, 0),
+        PowerConsumption = ReadInt(2),
+        DI1 = ReadBool(16, 0),
+        DI2 = ReadBool(16, 1),
+        Timestamp = DateTime.UtcNow
+    };
+}
+
+bool DoOneCycle()
+{
+    if (plc == null)
+    {
+        return false;
+    }
+
+    var machine = ReadMachineData(plc);
+
+    var now = DateTime.UtcNow;
+    if (now < nextSendTime)
+    {
+        var waitMs = (int)Math.Clamp((nextSendTime - now).TotalMilliseconds, 0, int.MaxValue);
+        if (waitMs > 0 && WaitWithCancellation(waitMs))
+        {
+            throw new OperationCanceledException();
+        }
+    }
+
+    var success = apiClient.SendMachineDataAsync(machine.Abbreviation, machine).GetAwaiter().GetResult();
+    if (!success)
+    {
+        throw new InvalidOperationException("API send failed");
+    }
+
+    nextSendTime = DateTime.UtcNow.AddMilliseconds(apiSendInterval);
+    return true;
+}
+
+if (!Connect())
+{
+    if (!TryReconnect())
+    {
+        SafeClose();
+        return;
+    }
+}
+
+while (!cts.IsCancellationRequested)
+{
+    try
+    {
+        if (plc != null && plc.IsConnected && DoOneCycle())
+        {
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 📊 PLC OK; posílám na API…");
+            backoffMs = 1000;
+
+            if (WaitWithCancellation(plcReadInterval))
+            {
+                break;
+            }
+
+            continue;
+        }
+
+        throw new InvalidOperationException("PLC cycle failed");
     }
     catch (OperationCanceledException)
     {
-        return;
+        break;
     }
-
-    while (!cts.Token.IsCancellationRequested)
+    catch (Exception ex) when (!cts.IsCancellationRequested)
     {
-        iteration++;
-        
-        if (latestData.TryGetValue("DRST_0001", out var machine))
-        {
-            var success = await apiClient.SendMachineDataAsync("DRST_0001", machine);
-            
-            if (success)
-            {
-                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ✓ API #{iteration} - Data úspěšně odeslána");
-            }
-            else
-            {
-                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ✗ API #{iteration} - Chyba při odesílání");
-            }
-        }
-        else
-        {
-            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ⚠️  API #{iteration} - Žádná data k odeslání");
-        }
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ❌ PLC read error: {ex.Message}");
+        SafeClose();
 
-        try
-        {
-            await Task.Delay(apiSendInterval, cts.Token);
-        }
-        catch (OperationCanceledException)
+        if (!TryReconnect())
         {
             break;
         }
     }
-}, cts.Token);
+}
 
-// Čekání na dokončení obou úkolů
-await Task.WhenAll(plcReadTask, apiSendTask);
-
-// Cleanup (nedosažitelné kvůli nekonečné smyčce, ale dobré mít)
-apiClient.Dispose();
-plcReader.Close();
+SafeClose();
