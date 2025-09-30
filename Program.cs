@@ -34,13 +34,15 @@ Console.WriteLine("Pro ukončení stiskněte Ctrl+C");
 Console.WriteLine();
 Console.WriteLine("--- Spouštím dva asynchronní procesy ---");
 
-// CancellationToken pro elegantní ukončení
-var cts = new CancellationTokenSource();
+using var cts = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) =>
 {
     e.Cancel = true;
-    cts.Cancel();
-    Console.WriteLine("\n--- Ukončování aplikace... ---");
+    if (!cts.IsCancellationRequested)
+    {
+        Console.WriteLine("\n--- Ukončování aplikace... ---");
+        cts.Cancel();
+    }
 };
 
 // Task 1: PLC připojení a čtení dat každou sekundu
