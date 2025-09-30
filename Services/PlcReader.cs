@@ -5,10 +5,12 @@ namespace UbuntuPlcApiSender.Services;
 
 public class PlcReader
 {
-    private readonly Plc _plc;
+    private Plc? _plc;
     private readonly string _ipAddress;
     private readonly short _rack;
     private readonly short _slot;
+    private bool _isConnected = false;
+    private readonly object _connectionLock = new object();
 
     private readonly (string Abbr, int RunByte, int RunBit, int PowerOffset, int DI1Byte, int DI1Bit, int DI2Byte, int DI2Bit)[] _machineMap =
     {
@@ -50,7 +52,128 @@ public class PlcReader
         _ipAddress = ip;
         _rack = rack;
         _slot = slot;
-        _plc = new Plc(CpuType.S71500, _ipAddress, _rack, _slot);
+    }
+
+    public bool IsConnected => _isConnected;
+
+    /// <summary>
+    /// Asynchronně se pokusí připojit k PLC s retry logikou
+    /// </summary>
+    public async Task<bool> TryConnectAsync(CancellationToken cancellationToken = default)
+    {
+        lock (_connectionLock)
+        {
+            if (_isConnected && _plc?.IsConnected == true)
+            {
+                return true;
+            }
+
+            // Zavřít existující spojení pokud existuje
+            try
+            {
+                _plc?.Close();
+            }
+            catch { }
+
+            _plc = new Plc(CpuType.S71500, _ipAddress, _rack, _slot);
+        }
+
+        var maxRetries = 3;
+        var baseDelay = TimeSpan.FromMilliseconds(1000);
+
+        for (int attempt = 1; attempt <= maxRetries; attempt++)
+        {
+            if (cancellationToken.IsCancellationRequested)
+                return false;
+
+            try
+            {
+                _plc.Open();
+
+                if (_plc.IsConnected)
+                {
+                    lock (_connectionLock)
+                    {
+                        _isConnected = true;
+                    }
+                    
+                    if (attempt > 1)
+                    {
+                        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ✅ PLC připojeno na pokus #{attempt}");
+                    }
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 🔄 Pokus #{attempt} připojení k PLC {_ipAddress}: {ex.Message}");
+                
+                if (attempt < maxRetries)
+                {
+                    var delay = TimeSpan.FromMilliseconds(baseDelay.TotalMilliseconds * Math.Pow(2, attempt - 1));
+                    await Task.Delay(delay, cancellationToken);
+                }
+            }
+        }
+
+        lock (_connectionLock)
+        {
+            _isConnected = false;
+        }
+        
+        return false;
+    }
+
+    /// <summary>
+    /// Přečte data pro všechny 4 stroje
+    /// </summary>
+    public async Task<(List<Machine> machines, bool success, string? errorMessage)> ReadAllMachinesAsync()
+    {
+        var machines = new List<Machine>();
+        
+        if (!_isConnected || _plc?.IsConnected != true)
+        {
+            return (machines, false, "PLC není připojeno");
+        }
+
+        try
+        {
+            foreach (var (abbr, runByte, runBit, powerOffset, di1Byte, di1Bit, di2Byte, di2Bit) in _machineMap)
+            {
+                var machine = new Machine
+                {
+                    ExternalId = abbr,
+                    ElectricityConsumption = ReadInt(powerOffset),
+                    PlcConnected = true, // Pokud čteme data, PLC je připojeno
+                    Stav1 = ReadBool(runByte, runBit),
+                    Stav2 = ReadBool(di1Byte, di1Bit),
+                    Stav3 = ReadBool(di2Byte, di2Bit),
+                    Stav4 = false, // Zatím nemáme mapování pro stav4-6
+                    Stav5 = false,
+                    Stav6 = false,
+                    Timestamp = DateTime.UtcNow
+                };
+                
+                machines.Add(machine);
+            }
+
+            return (machines, true, null);
+        }
+        catch (Exception ex)
+        {
+            lock (_connectionLock)
+            {
+                _isConnected = false;
+            }
+            
+            try
+            {
+                _plc?.Close();
+            }
+            catch { }
+
+            return (machines, false, $"Chyba při čtení dat z PLC: {ex.Message}");
+        }
     }
 
     public bool TryReadDRST0001(out Machine? machine, out string? errorMessage)
@@ -212,9 +335,14 @@ public class PlcReader
 
     public void Close()
     {
-        if (_plc.IsConnected)
+        lock (_connectionLock)
         {
-            _plc.Close();
+            _isConnected = false;
+            try
+            {
+                _plc?.Close();
+            }
+            catch { }
         }
     }
 

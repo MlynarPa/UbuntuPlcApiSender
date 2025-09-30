@@ -1,0 +1,48 @@
+{
+  "machines": [
+    {
+      "externalId": "DRST_0001",
+      "electricityConsumption": 20,
+      "plcConnected": true,
+      "stav1": true,
+      "stav2": true,
+      "stav3": false,
+      "stav4": false,
+      "stav5": false,
+      "stav6": false
+    },
+    {
+      "externalId": "DRST_0002",
+      "electricityConsumption": 0,
+      "plcConnected": false,
+      "stav1": false,
+      "stav2": false,
+      "stav3": false,
+      "stav4": false,
+      "stav5": false,
+      "stav6": false
+    },
+    {
+      "externalId": "DRST_0003",
+      "electricityConsumption": 0,
+      "plcConnected": false,
+      "stav1": false,
+      "stav2": false,
+      "stav3": false,
+      "stav4": false,
+      "stav5": false,
+      "stav6": false
+    },
+    {
+      "externalId": "DRST_0004",
+      "electricityConsumption": 0,
+      "plcConnected": false,
+      "stav1": false,
+      "stav2": false,
+      "stav3": false,
+      "stav4": false,
+      "stav5": false,
+      "stav6": false
+    }
+  ]
+}
