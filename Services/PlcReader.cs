@@ -130,10 +130,52 @@ public class PlcReader
     public async Task<(List<Machine> machines, bool success, string? errorMessage)> ReadAllMachinesAsync()
     {
         var machines = new List<Machine>();
-        
-        if (!_isConnected || _plc?.IsConnected != true)
+
+        // Základní kontrola spojení
+        if (!_isConnected || _plc == null)
         {
             return (machines, false, "PLC není připojeno");
+        }
+
+        // Test živosti spojení - pokus o čtení jednoho bytu
+        // Toto detekuje dead connections které IsConnected nezachytí
+        try
+        {
+            // Kontrola pomocí IsConnected property
+            if (!_plc.IsConnected)
+            {
+                lock (_connectionLock)
+                {
+                    _isConnected = false;
+                }
+
+                try
+                {
+                    _plc.Close();
+                }
+                catch { }
+
+                return (machines, false, "PLC spojení ztraceno (IsConnected = false)");
+            }
+
+            // Aktivní test - zkusíme přečíst první byte z DB1
+            // Pokud spojení je dead, toto vyhodí exception
+            await Task.Run(() => _plc.ReadBytes(DataType.DataBlock, 1, 0, 1));
+        }
+        catch (Exception ex)
+        {
+            lock (_connectionLock)
+            {
+                _isConnected = false;
+            }
+
+            try
+            {
+                _plc.Close();
+            }
+            catch { }
+
+            return (machines, false, $"PLC spojení test selhal: {ex.Message}");
         }
 
         try
