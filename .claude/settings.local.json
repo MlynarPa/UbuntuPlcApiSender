@@ -4,7 +4,8 @@
       "Bash(dotnet build)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git config:*)"
+      "Bash(git config:*)",
+      "Bash(dotnet --list-runtimes)"
     ],
     "deny": [],
     "ask": []
