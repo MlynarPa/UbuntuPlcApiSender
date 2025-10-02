@@ -187,15 +187,16 @@ public class PlcReader
                     ExternalId = abbr,
                     ElectricityConsumption = ReadInt(powerOffset),
                     PlcConnected = true, // Pokud čteme data, PLC je připojeno
-                    Stav1 = ReadBool(runByte, runBit),
-                    Stav2 = ReadBool(di1Byte, di1Bit),
-                    Stav3 = ReadBool(di2Byte, di2Bit),
-                    Stav4 = false, // Zatím nemáme mapování pro stav4-6
+                    IsRunning = ReadBool(runByte, runBit), // Běh stroje - NEodesílá se do API
+                    Stav1 = ReadBool(di1Byte, di1Bit),     // DI1 - odesílá se
+                    Stav2 = ReadBool(di2Byte, di2Bit),     // DI2 - odesílá se
+                    Stav3 = false, // DI3 - zatím nemáme mapování
+                    Stav4 = false, // DI4 - zatím nemáme mapování
                     Stav5 = false,
                     Stav6 = false,
                     Timestamp = DateTime.UtcNow
                 };
-                
+
                 machines.Add(machine);
             }
 
@@ -448,6 +449,9 @@ public class PlcReader
 
     private bool ReadBool(int byteOffset, int bitOffset)
     {
+        if (_plc == null)
+            throw new Exception("PLC není inicializováno");
+
         var value = _plc.Read(DataType.DataBlock, 1, byteOffset, VarType.Bit, 1, (byte)bitOffset);
         if (value is bool b)
         {
@@ -459,6 +463,9 @@ public class PlcReader
 
     private short ReadInt(int offset)
     {
+        if (_plc == null)
+            throw new Exception("PLC není inicializováno");
+
         var rawObj = _plc.ReadBytes(DataType.DataBlock, 1, offset, 2);
         if (rawObj is not byte[] raw || raw.Length < 2)
         {

@@ -62,16 +62,18 @@ public class ApiClient
 
     /// <summary>
     /// Vytvoří fallback data pro stroje když PLC není připojeno
+    /// -300W signalizuje problém s PLC připojením
     /// </summary>
     public List<Machine> CreateFallbackMachines(bool plcConnected)
     {
         var machineIds = new[] { "DRST_0001", "DRST_0002", "DRST_0003", "DRST_0004" };
-        
+
         return machineIds.Select(id => new Machine
         {
             ExternalId = id,
-            ElectricityConsumption = 0,
+            ElectricityConsumption = -300, // -300W = indikátor problému s PLC
             PlcConnected = plcConnected,
+            IsRunning = false,
             Stav1 = false,
             Stav2 = false,
             Stav3 = false,

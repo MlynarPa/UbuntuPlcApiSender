@@ -50,85 +50,112 @@ var plcTask = Task.Run(async () =>
 {
     var iteration = 0;
     var connectionAttempts = 0;
-    
-    while (!cts.Token.IsCancellationRequested)
+
+    try
     {
-        iteration++;
-        
-        // Pokus o připojení pokud nejsme připojeni
-        if (!plcReader.IsConnected)
+        while (!cts.Token.IsCancellationRequested)
         {
-            connectionAttempts++;
-            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 🔄 Pokus o připojení k PLC #{connectionAttempts}...");
-            
-            var connected = await plcReader.TryConnectAsync(cts.Token);
-            if (connected)
+            iteration++;
+
+            try
             {
-                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ✅ PLC úspěšně připojeno po {connectionAttempts} pokusech");
-                connectionAttempts = 0;
+                // Pokus o připojení pokud nejsme připojeni
+                if (!plcReader.IsConnected)
+                {
+                    connectionAttempts++;
+                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 🔄 Pokus o připojení k PLC #{connectionAttempts}...");
+
+                    var connected = await plcReader.TryConnectAsync(cts.Token);
+                    if (connected)
+                    {
+                        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ✅ PLC úspěšně připojeno po {connectionAttempts} pokusech");
+                        connectionAttempts = 0;
+                    }
+                    else
+                    {
+                        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ❌ PLC připojení selhalo, zkusím znovu za {readInterval}ms");
+
+                        // Vytvoříme fallback data s plcConnected = false
+                        var fallbackMachines = apiClient.CreateFallbackMachines(false);
+                        lock (machinesLock)
+                        {
+                            latestMachines.Clear();
+                            latestMachines.AddRange(fallbackMachines);
+                        }
+
+                        try
+                        {
+                            await Task.Delay(readInterval, cts.Token);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+
+                // Čtení dat z PLC
+                var (machines, success, errorMessage) = await plcReader.ReadAllMachinesAsync();
+
+                if (success && machines.Count > 0)
+                {
+                    lock (machinesLock)
+                    {
+                        latestMachines.Clear();
+                        latestMachines.AddRange(machines);
+                    }
+
+                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 📊 PLC #{iteration} - Data načtena pro {machines.Count} strojů");
+                    foreach (var machine in machines)
+                    {
+                        var runStatus = machine.IsRunning ? "▶️ BĚŽÍ" : "⏸️ STOJÍ";
+                        Console.WriteLine($"  • {machine.ExternalId}: {runStatus} | {machine.ElectricityConsumption}W | Stavy: {machine.Stav1},{machine.Stav2},{machine.Stav3},{machine.Stav4}");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ❌ PLC #{iteration} - {errorMessage ?? "Chyba při čtení dat"}");
+
+                    // Vytvoříme fallback data s plcConnected = false
+                    var fallbackMachines = apiClient.CreateFallbackMachines(false);
+                    lock (machinesLock)
+                    {
+                        latestMachines.Clear();
+                        latestMachines.AddRange(fallbackMachines);
+                    }
+                }
             }
-            else
+            catch (Exception ex)
             {
-                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ❌ PLC připojení selhalo, zkusím znovu za {readInterval}ms");
-                
-                // Vytvoříme fallback data s plcConnected = false
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ⚠️  PLC Task výjimka v iteraci #{iteration}: {ex.GetType().Name} - {ex.Message}");
+
+                // Při výjimce vytvoříme fallback data a pokusíme se o reconnect
                 var fallbackMachines = apiClient.CreateFallbackMachines(false);
                 lock (machinesLock)
                 {
                     latestMachines.Clear();
                     latestMachines.AddRange(fallbackMachines);
                 }
-                
-                try
-                {
-                    await Task.Delay(readInterval, cts.Token);
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
-                continue;
-            }
-        }
-        
-        // Čtení dat z PLC
-        var (machines, success, errorMessage) = await plcReader.ReadAllMachinesAsync();
-        
-        if (success && machines.Count > 0)
-        {
-            lock (machinesLock)
-            {
-                latestMachines.Clear();
-                latestMachines.AddRange(machines);
-            }
-            
-            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 📊 PLC #{iteration} - Data načtena pro {machines.Count} strojů");
-            foreach (var machine in machines)
-            {
-                Console.WriteLine($"  • {machine.ExternalId}: {machine.ElectricityConsumption}W | Stavy: {machine.Stav1},{machine.Stav2},{machine.Stav3}");
-            }
-        }
-        else
-        {
-            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ❌ PLC #{iteration} - {errorMessage ?? "Chyba při čtení dat"}");
-            
-            // Vytvoříme fallback data s plcConnected = false
-            var fallbackMachines = apiClient.CreateFallbackMachines(false);
-            lock (machinesLock)
-            {
-                latestMachines.Clear();
-                latestMachines.AddRange(fallbackMachines);
-            }
-        }
 
-        try
-        {
-            await Task.Delay(readInterval, cts.Token);
+                // Zavřít a označit jako odpojeno pro další pokus o připojení
+                plcReader.Close();
+            }
+
+            try
+            {
+                await Task.Delay(readInterval, cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
         }
-        catch (OperationCanceledException)
-        {
-            break;
-        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ❌ Kritická chyba v PLC Task: {ex.GetType().Name} - {ex.Message}");
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Stack trace: {ex.StackTrace}");
     }
 }, cts.Token);
 
@@ -137,44 +164,65 @@ var apiTask = Task.Run(async () =>
 {
     var iteration = 0;
     await Task.Delay(500); // Malé zpoždění aby PLC stihlo načíst první data
-    
-    while (!cts.Token.IsCancellationRequested)
-    {
-        iteration++;
-        
-        List<Machine> machinesToSend;
-        lock (machinesLock)
-        {
-            machinesToSend = new List<Machine>(latestMachines);
-        }
-        
-        if (machinesToSend.Count > 0)
-        {
-            var success = await apiClient.SendBulkMachineDataAsync(machinesToSend);
-            
-            if (success)
-            {
-                var plcStatus = machinesToSend.First().PlcConnected ? "PLC ✅" : "PLC ❌";
-                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ✓ API #{iteration} - Bulk data odeslána ({machinesToSend.Count} strojů, {plcStatus})");
-            }
-            else
-            {
-                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ✗ API #{iteration} - Chyba při odesílání bulk dat");
-            }
-        }
-        else
-        {
-            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ⚠️  API #{iteration} - Žádná data k odeslání");
-        }
 
-        try
+    try
+    {
+        while (!cts.Token.IsCancellationRequested)
         {
-            await Task.Delay(readInterval, cts.Token);
+            iteration++;
+
+            try
+            {
+                List<Machine> machinesToSend;
+                lock (machinesLock)
+                {
+                    machinesToSend = new List<Machine>(latestMachines);
+                }
+
+                if (machinesToSend.Count > 0)
+                {
+                    var success = await apiClient.SendBulkMachineDataAsync(machinesToSend);
+
+                    if (success)
+                    {
+                        var plcStatus = machinesToSend.First().PlcConnected ? "PLC ✅" : "PLC ❌";
+                        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ✓ API #{iteration} - Bulk data odeslána ({machinesToSend.Count} strojů, {plcStatus})");
+
+                        // Detail odeslaných dat
+                        foreach (var machine in machinesToSend)
+                        {
+                            Console.WriteLine($"    → {machine.ExternalId}: {machine.ElectricityConsumption}W | API Stavy: {machine.Stav1},{machine.Stav2},{machine.Stav3},{machine.Stav4}");
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ✗ API #{iteration} - Chyba při odesílání bulk dat");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ⚠️  API #{iteration} - Žádná data k odeslání");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ⚠️  API Task výjimka v iteraci #{iteration}: {ex.GetType().Name} - {ex.Message}");
+            }
+
+            try
+            {
+                await Task.Delay(readInterval, cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
         }
-        catch (OperationCanceledException)
-        {
-            break;
-        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ❌ Kritická chyba v API Task: {ex.GetType().Name} - {ex.Message}");
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Stack trace: {ex.StackTrace}");
     }
 }, cts.Token);
 
