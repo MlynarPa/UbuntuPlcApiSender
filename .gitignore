@@ -363,4 +363,4 @@ FodyWeavers.xsd
 last_machine_states.json
 
 # Linux build output (comment this line if you want to commit Linux builds to GitHub)
-# publish-linux/
+publish-linux/

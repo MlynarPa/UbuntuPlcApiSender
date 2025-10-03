@@ -7,9 +7,9 @@ REM Clean previous build
 echo Cistim predchozi build...
 if exist publish-linux rmdir /s /q publish-linux
 
-REM Build self-contained for linux-x64
-echo Sestavuji aplikaci pro Linux (self-contained)...
-dotnet publish -c Release -r linux-x64 --self-contained true -o ./publish-linux
+REM Build self-contained for linux-arm64 (Raspberry Pi)
+echo Sestavuji aplikaci pro Linux ARM64 (Raspberry Pi, self-contained)...
+dotnet publish -c Release -r linux-arm64 --self-contained true -o ./publish-linux
 
 if %ERRORLEVEL% EQU 0 (
     echo ✅ Build uspesny!
