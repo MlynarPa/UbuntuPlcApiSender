@@ -11,6 +11,8 @@ public class PlcReader
     private readonly short _slot;
     private bool _isConnected = false;
     private readonly object _connectionLock = new object();
+    private DateTime _lastSuccessfulRead = DateTime.MinValue;
+    private readonly TimeSpan _connectionTimeout = TimeSpan.FromSeconds(2);
 
     private readonly (string Abbr, int RunByte, int RunBit, int PowerOffset, int DI1Byte, int DI1Bit, int DI2Byte, int DI2Bit)[] _machineMap =
     {
@@ -95,8 +97,9 @@ public class PlcReader
                     lock (_connectionLock)
                     {
                         _isConnected = true;
+                        _lastSuccessfulRead = DateTime.Now; // Reset timeout při novém spojení
                     }
-                    
+
                     if (attempt > 1)
                     {
                         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ✅ PLC připojeno na pokus #{attempt}");
@@ -135,6 +138,24 @@ public class PlcReader
         if (!_isConnected || _plc == null)
         {
             return (machines, false, "PLC není připojeno");
+        }
+
+        // Kontrola timeout - pokud poslední úspěšné čtení bylo před >2s, spojení je mrtvé
+        if (_lastSuccessfulRead != DateTime.MinValue &&
+            DateTime.Now - _lastSuccessfulRead > _connectionTimeout)
+        {
+            lock (_connectionLock)
+            {
+                _isConnected = false;
+            }
+
+            try
+            {
+                _plc.Close();
+            }
+            catch { }
+
+            return (machines, false, "PLC spojení timeout - žádné úspěšné čtení >2s");
         }
 
         // Test živosti spojení - pokus o čtení jednoho bytu
@@ -182,13 +203,15 @@ public class PlcReader
         {
             foreach (var (abbr, runByte, runBit, powerOffset, di1Byte, di1Bit, di2Byte, di2Bit) in _machineMap)
             {
+                var isRunning = ReadBool(runByte, runBit);
+
                 var machine = new Machine
                 {
                     ExternalId = abbr,
                     ElectricityConsumption = ReadInt(powerOffset),
                     PlcConnected = true, // Pokud čteme data, PLC je připojeno
-                    IsRunning = ReadBool(runByte, runBit), // Běh stroje - NEodesílá se do API
-                    Stav1 = ReadBool(di1Byte, di1Bit),     // DI1 - odesílá se
+                    IsRunning = isRunning, // Běh stroje
+                    Stav1 = isRunning,     // Stav1 = IsRunning (stroj běží/stojí)
                     Stav2 = ReadBool(di2Byte, di2Bit),     // DI2 - odesílá se
                     Stav3 = false, // DI3 - zatím nemáme mapování
                     Stav4 = false, // DI4 - zatím nemáme mapování
@@ -200,6 +223,9 @@ public class PlcReader
                 machines.Add(machine);
             }
 
+            // Úspěšné čtení - aktualizuj timestamp
+            _lastSuccessfulRead = DateTime.Now;
+
             return (machines, true, null);
         }
         catch (Exception ex)
@@ -208,7 +234,7 @@ public class PlcReader
             {
                 _isConnected = false;
             }
-            
+
             try
             {
                 _plc?.Close();
