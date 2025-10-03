@@ -5,7 +5,9 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(git config:*)",
-      "Bash(dotnet --list-runtimes)"
+      "Bash(dotnet --list-runtimes)",
+      "Bash(powershell:*)",
+      "Bash(bash:*)"
     ],
     "deny": [],
     "ask": []

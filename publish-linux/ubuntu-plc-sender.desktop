@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Ubuntu PLC Sender
+Comment=PLC data sender for drevostroj.app
+Exec=/opt/ubuntu-plc-sender/UbuntuPlcApiSender
+Icon=/opt/ubuntu-plc-sender/app.png
+Terminal=true
+Categories=Utility;Network;
+Keywords=PLC;S7;API;Industrial;
+StartupNotify=false
